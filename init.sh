@@ -32,14 +32,14 @@
 # 		GLOBAL DECLARATIONS
 
 STATUS="pass"	# Flag to determine the success of the program compilation
-
+rm stderr &> /dev/null
 
 #		FUNCTIONS
 
 buildJSON() { # buildJSON(status = "$STATUS", output = "$OUTPUT") | Takes gathered variables and builds them into a json string which is returned to the backend
 	local status="${1:-}"
 	local output="${2:-}"
-	local stderr="$(cat stderr 2> /dev/null | tr '\n' ',')" # Get the errors stored in stderr file and replace the newlines with commas
+	local stderr="$(cat stderr 2> /dev/null | tr -d '\n' | tr -s '⠀' ',')" # Get the errors stored in stderr file and replace the newlines with commas
 
 	local json="{"
 	json+="\"status\":\"$status\""
@@ -64,11 +64,11 @@ buildJSON() { # buildJSON(status = "$STATUS", output = "$OUTPUT") | Takes gather
 	fi
 }
 
-parseJSON() { # parseJSON(json, filter = '.') | Parse JSON using jq and return the values found by the given filter or false if the filter fails
+parseJSON() { # parseJSON(json, filter = '.') | Parse JSON using jq and return the values found by the given filter or false if filter fails
 	local json="${1:-$json}"
 	local filter="${2:-.}"
 	filter+=" // empty"
-	local result="$(echo $json | jq -r "$filter" 2> /dev/null || echo false)"
+	local result="$(echo "$json" | jq -r "$filter" 2> /dev/null || echo false)"
 	echo -e "$result"	
 }
 
@@ -81,10 +81,9 @@ checkComp() { # checkComp(command, time = 30, input = '')  | Pass a series of in
 	then
 		results="$(timeout $time $command 2>&1)"
 	else
-		results="$(timeout $time $command <<< "$input" 2>&1)"
+		results="$(timeout $time $command <<< "$(echo -e "$input")" 2>&1)"
 	fi
 	local status=$?
-	
 	if [ "$status" = 124 ]
 	then 
 		sendErr "Program hangs. Incorrectly waiting for input?"
@@ -92,16 +91,16 @@ checkComp() { # checkComp(command, time = 30, input = '')  | Pass a series of in
 	
 	elif [ "$status" != 0 ]
 	then
-		sendErr "$results"
 		sendErr "Program failed to compile"
+		sendErr "$results"
 		echo false
 	
-	else	
+	elif [ ! -z "$results" ]
+	then
 		local numLines="$(echo -e "$results" | wc -l)"
 		for (( i = 1; i <= numLines; i++ ))
 		do
 			local result="$(echo -e "$results" | awk -v i="$i" 'BEGIN{ RS = "" ; FS = "\n" }{print $i}')"
-			
 			if [ ! -z "$result" ]
 			then
 				case+="$(jq -aR . <<< $result)"
@@ -126,45 +125,47 @@ sendErr() { # sendErr(*strings) | Pipe given strings to stderr
 	else
 		str="$@"
 	fi
-	jq -aR . <<< "$str" >> stderr 
+	echo "$(jq -aR . <<< "$(echo "$str" | awk '{printf "%s\\n", $0}')")⠀" >> stderr # Append at the end of the message to distinguish newlines from the intended end of a message
 }
 
 testInput() { # testInput(json, command) | Take input, run through program and determine status, returns false if code hangs or fails to compile
-local json="$1"
-local command="$2"
-local numCases=$(parseJSON "$json" ".|length")
-local msg=""
-local status="pass"
-for (( iCase = 0; iCase < numCases; iCase++ )); # Iterate through cases, i.e. [3, 2] 
-do
-	local numInputs=$(parseJSON "$json" ".[$iCase]|length")
-	local iString=""
-
-	for (( iInput = 0; iInput < numInputs; iInput++ ));
+	local json="$1"
+	local command="$2"
+	local numCases=$(parseJSON "$json" ".|length")
+	local msg=""
+	local status="pass"
+	for (( iCase = 0; iCase < numCases; iCase++ )); # Iterate through cases, i.e. [3, 2] 
 	do
-		iString+="$(parseJSON "$json" ".[$iCase][$iInput]")\n"
-	done
-	local results="$(checkComp "$command" 5 "$iString")"
+			local numInputs=$(parseJSON "$json" ".[$iCase]|length")
+			local iString=""
 	
-	if [ ! "$results" = false ]
+			for (( iInput = 0; iInput < numInputs; iInput++ ));
+			do
+				iString+="$(parseJSON "$json" ".[$iCase][$iInput]")\n"
+			done
+
+			local results="$(checkComp "$command" 5 "$iString")"
+			if [ "$results" = false ]
+			then
+				status="fail"
+
+			elif [ ! -z "$results" ]
+			then
+				msg+="$results"
+			
+				if [ $iCase -ne $((numCases - 1)) ]
+				then
+					msg+=", "
+				fi
+			fi
+	done
+	if [ "$status" = "fail" ]
 	then
-		msg+="$results"
-		
-		if [ $iCase -ne $((numCases - 1)) ]
-		then
-			msg+=", "
-		fi
-	else
-		status="fail"
+		echo false
+	elif [ "$status" = "pass" ]
+	then
+		echo "$msg"
 	fi
-done
-if [ "$status" = "fail" ]
-then
-	echo false
-elif [ "$status" = "pass" ]
-then
-	echo "$msg"
-fi
 }
 
 
@@ -183,6 +184,7 @@ else
 	then
 		sendErr "Malformed JSON received"
 		STATUS="fail"
+	
 	elif [ "$STATUS" != "fail" ]
 	then
 		# 	JSON PARSING
@@ -218,18 +220,41 @@ else
 	
 				elif [ "$language" = "cpp" ]
 				then
-		        		echo -e "$code" > code.cpp && g++ code.cpp 2>>stderr || STATUS="fail" || sendErr "Code failed to compile" # Outputs code to required file then compiles it
-		        		cmd="./a.out" # Executable to run
+		        		echo "$code" > code.cpp
+					error="$(g++ code.cpp 2>&1)"
+					status=$?
+
+					if [ $status != 0 ]
+					then
+						STATUS="fail"
+						sendErr "Code failed to compile"
+						sendErr "$error"
+					else
+						cmd="./a.out" # Executable to run
+					fi
 		
 				elif [ "$language" = "bash" ]
 				then
 					echo -e "$code" > code.sh
 					cmd="bash code.sh"
+
+				elif [ "$language" = "java" ]
+				then
+					echo "$code" > code.java
+					error="$(javac code.java 2>&1)"
+					if [ $? != 0 ]
+					then
+						STATUS="fail"
+						sendErr "Code failed to compile"
+						sendErr "$error"
+					else
+						cmd="java "$(ls | grep '.class' | sed 's/.class//g')""
+
+					fi
 				else
 		        		sendErr "Invalid language provided: $language"
 					STATUS="fail"	# FAIL STATE: Invalid language means we cannot compile the code
 				fi
-
 
 				# input; Test inputs (Not necessary):
 
@@ -244,14 +269,17 @@ else
 					results="$(testInput "$input" "$cmd")"	
 						
 				fi
+				
 				if [ "$results" = false ]
 				then
 					STATUS="fail"
-				else
+
+				elif [ ! -z "$results" ]
+				then
 					OUTPUT+="$results"
 				fi
 			fi
 		fi
 	fi
 fi
-echo -e "$(buildJSON "$STATUS" "$OUTPUT")"
+echo -E "$(buildJSON "$STATUS" "$OUTPUT")"
