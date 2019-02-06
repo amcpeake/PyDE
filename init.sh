@@ -2,170 +2,148 @@
 #
 # 		ACCREDITATION
 #
-# 	All code, including frontend, backend, and handler (this script) was written by Aidan McPeake unless otherwise specified
+# All code, including frontend, backend, and handler (this script) was written by Aidan McPeake unless otherwise specified
 #
 #
 #		ARGUMENTS
 #
-# 	One single argument is passed from the backend in the following JSON format: (Where "" denotes a string, and [] denotes a list)
-# 		{"language": "", "code": "", "input": [ [] ]}
+# One single argument is passed from the backend in the following JSON format:
+# 	{"language": "", "code": "", "io" {}}
 #
-# 	Language refers to the programming language, i.e. python. It is used to determine which commands to execute to compile the user-provided code
+# Language refers to the programming language, i.e. python. It is used to determine which commands to execute to compile the user-provided code
 #
-# 	Code is the aforementioned user-provided code. Is is sent as an escaped string
+# Code is the aforementioned user-provided code. Is is sent as an escaped string
 #
-# 	Input refers simply to sets of input which are to be piped into the given code via stdin redirection (See checkComp() function)
+# io refers to the test inputs/outputs. This value is technically optional but almost always used to some degree. It is in the form:: 
+# 	{"given": [[]], "hidden": [[]]}
 #
-# 	This program returns JSON in the form:
-#		{"status": "pass|fail", "stderr":[ "" ], "output": [ [] ]}
+#
+#		INFO
+#
+# Some challenges will have test inputs and expected outputs. For these challenges, sets of I/O will be provided to the user as examples, and some will be hidden from the user to prevent hard-coding. These sets of I/O are run through the program and used to determine the success of the challenge. Anything sent to STDOUT will be regarded as a success and anything sent to STDERR will be regarded as a failure.
+#
+# The backend determines the final result of the tests based on whether output is sent to stderr or stdout, as such we need to catch all output from execute commands and parse it ourselves before finally determining the status
+#
+# ${VAR1:-VAR2} -- evaluates to VAR1 if VAR1 has a value or VAR2 if not. This is used to set default values if none are given. The remainder of the code should be self explanatory for those familiar with bash
 #
 #
 #		PROCESS
-#
-#	1. Backend passes input as JSON to this script
-#	2. Input is parsed into required fields (language, code, input)
-#	3. Code is compiled according to which language it is written in
-#	4. If input is present, pipe test input and parse result into sets of output
-#	5. Errors, output, etc. is parsed into a JSON string and returned to backend
-#
-#
+#1. Backend passes input as JSON to this script
+#2. Input is parsed into required fields (language, code, io)
+#3. Code is compiled according to which language it is written in
+#4. If io is present, run test cases; Pipe test input and compare the actual output to the expected output.
+#5. Output of compilation/test cases are parsed into JSON and returned to backend upon completion of the program
 # 		GLOBAL DECLARATIONS
 
-STATUS="pass"	# Flag to determine the success of the program compilation
+STATUS="pass" 	# Flag to determine the success of the program compilation
+OUTPUT=""	# Output from corresponding 
+rm stdout &> /dev/null
 rm stderr &> /dev/null
-
 #		FUNCTIONS
-
-buildJSON() { # buildJSON(status = "$STATUS", output = "$OUTPUT") | Takes gathered variables and builds them into a json string which is returned to the backend
-	local status="${1:-}"
+getJSON() { # getJSON(status = "fail", output = "", errors = "", tests = "")
+	local status="${1:-fail}"
 	local output="${2:-}"
-	local stderr="$(cat stderr 2> /dev/null | tr -d '\n' | tr -s '⠀' ',')" # Get the errors stored in stderr file and replace the newlines with commas
-
-	local json="{"
-	json+="\"status\":\"$status\""
-
-	if [ ! -z "$output" ] # If the variable "output" is set...
+	local stdout=$(cat stdout 2> /dev/null)
+	local stderr=$(cat stderr 2> /dev/null)
+	local json="{\"status\":\"$status\""
+	if [ ! -z "$output" ]
 	then
-		json+=", \"output\":[ $output ]" # Add it to our json string
+		json+=", \"output\":{ $output }"
 	fi
-
+	if [ ! -z "$stdout" ]
+	then
+		json+=", \"stdout\":\"$stdout\""
+	fi
 	if [ ! -z "$stderr" ]
 	then
-		json+=", \"stderr\":[ ${stderr%?} ]" # %? removes the last character from the string (which is an invalid ',')
+		json+=", \"stderr\":\"$stderr\""
 	fi
-	
 	json+="}"
-	
-	if [ "$(parseJSON "$json" '.')" ] # Validate JSON before returning
-        then
-		echo -e "$json"
-	else
-		echo false
-	fi
+	echo -E "$json"
 }
 
-parseJSON() { # parseJSON(json, filter = '.') | Parse JSON using jq and return the values found by the given filter or false if filter fails
-	local json="${1:-$json}"
+parseJSON() { # parseJSON(json, filter = '.')	| parse JSON using jq and return the given values
+	local json="${1:-json}"
 	local filter="${2:-.}"
 	filter+=" // empty"
-	local result="$(echo "$json" | jq -r "$filter" 2> /dev/null || echo false)"
+	local result="$(echo $json | jq -r "$filter")"
 	echo -e "$result"	
 }
 
-checkComp() { # checkComp(command, time = 30, input = '')  | Pass a series of inputs, run the code on a timer to catch hanging and return the outputs in form ["x1", "y1", "z1"], ["x2", "y2", "z2"]...
+checkHang() { # checkHang(command, time = 30, input = '')  | Run a command on a timer, return the STDOUT or False if it hangs longer than alloted
 	local command="$1"
 	local time=${2:-30} # Evaluates to $1 if $1 is set and not null and defaults to 30 otherwise
 	local input="${3:-}"
-	local results # Must be declared separately to avoid sweeping of exit codes
 	if [ -z "$input" ]
 	then
-		results="$(timeout $time $command 2>&1)"
+		local result="$(timeout $time $command 2>> stderr || echo false)"
 	else
-		results="$(timeout $time $command <<< "$(echo -e "$input")" 2>&1)"
+		local result="$(timeout $time $command <<< "$(echo -e "$input")" 2>> stderr || echo false)"
 	fi
-	local status=$?
-	if [ "$status" = 124 ]
-	then 
-		sendErr "Program hangs. Incorrectly waiting for input?"
-		echo false
-	
-	elif [ "$status" != 0 ]
-	then
-		sendErr "Program failed to compile"
-		sendErr "$results"
-		echo false
-	
-	elif [ ! -z "$results" ]
-	then
-		local numLines="$(echo -e "$results" | wc -l)"
-		for (( i = 1; i <= numLines; i++ ))
-		do
-			local result="$(echo -e "$results" | awk -v i="$i" 'BEGIN{ RS = "" ; FS = "\n" }{print $i}')"
-			if [ ! -z "$result" ]
-			then
-				case+="$(jq -aR . <<< $result)"
+	echo "$result"
+}
 
-				if [ $i -ne $numLines ]
-				then
-					case+=", "
-				fi
-			fi
-		done
-		if [ ! -z "$case" ]
+sendErr() { # errcho(*strings) | Pipe given strings to stderr
+	echo -e "$@" >> stderr 
+}
+
+sendOut() { # sendOut(*strings) | Pipe given strings to stdout
+	echo -e "$@" >> stdout
+}
+
+testVals () { # testVals(json, command) | Take I/O, run through program and determine status
+#	LOCAL DECLARATIONS
+local json="$1"
+local command="$2"
+local numScopes=$(parseJSON "$json" ".|length")
+local msg=""
+for (( iScope = 0; iScope < numScopes; iScope++ )); # Iterate through scopes (i.e. "given"/"hidden") 
+do
+	local scope="$(parseJSON "$json" ".|keys[$iScope]")"
+	msg+="\"$scope\": [ "
+	local numCases=$(parseJSON "$json" ".[\"$scope\"]|length")
+        for (( iCase = 0; iCase < numCases; iCase++ ));
+        do
+		local numInputs=$(parseJSON "$json" ".[\"$scope\"][$iCase]|length")
+		local iString=""
+
+                for (( iInput = 0; iInput < numInputs; iInput++ ));
+                do
+			iString+="$(parseJSON "$json" ".[\"$scope\"][$iCase][$iInput]")\n"
+                done
+
+		local results="$(checkHang "$command" 5 "$iString")"
+
+	       	if [ "$results" = false ]
 		then
-			echo "[$case]"
-		fi
-	fi
-}
-
-sendErr() { # sendErr(*strings) | Pipe given strings to stderr
-	if [ -z "$1" ]
-	then
-		read str
-	else
-		str="$@"
-	fi
-	echo "$(jq -aR . <<< "$(echo "$str" | awk '{printf "%s\\n", $0}')")⠀" >> stderr # Append at the end of the message to distinguish newlines from the intended end of a message
-}
-
-testInput() { # testInput(json, command) | Take input, run through program and determine status, returns false if code hangs or fails to compile
-	local json="$1"
-	local command="$2"
-	local numCases=$(parseJSON "$json" ".|length")
-	local msg=""
-	local status="pass"
-	for (( iCase = 0; iCase < numCases; iCase++ )); # Iterate through cases, i.e. [3, 2] 
-	do
-			local numInputs=$(parseJSON "$json" ".[$iCase]|length")
-			local iString=""
-	
-			for (( iInput = 0; iInput < numInputs; iInput++ ));
-			do
-				iString+="$(parseJSON "$json" ".[$iCase][$iInput]")\n"
-			done
-
-			local results="$(checkComp "$command" 5 "$iString")"
-			if [ "$results" = false ]
+			STATUS="fail"
+			sendErr "Error: Code hangs when compiled"	
+		else
+			local numOutputs=$(echo -e "$results" | wc -l)	
+			msg+="["
+			for (( iOutput = 0; iOutput < numOutputs; iOutput++ ));
+                	do
+				local result="$(echo $results | awk -v i=$(( iOutput + 1)) '{print $i}')"
+				msg+="$result"
+				if [ $iOutput -ne $((numOutputs - 1)) ]
+                        	then
+                                	msg+=", "
+                        	fi
+                	done
+			msg+="]"
+			if [ $iCase -ne $((numCases - 1)) ]
 			then
-				status="fail"
-
-			elif [ ! -z "$results" ]
-			then
-				msg+="$results"
-			
-				if [ $iCase -ne $((numCases - 1)) ]
-				then
-					msg+=", "
-				fi
+				msg+=", "
 			fi
-	done
-	if [ "$status" = "fail" ]
+		fi
+        done
+	msg+=" ]"
+	if [ $iScope -ne $((numScopes - 1)) ]
 	then
-		echo false
-	elif [ "$status" = "pass" ]
-	then
-		echo "$msg"
+		msg+=", "
 	fi
+done
+echo "$msg"
 }
 
 
@@ -180,106 +158,84 @@ then
 	STATUS="fail" 	# FAIL STATE: No input means we cannot compile
 else
 	json=$1
-	if [ ! "$(parseJSON "$json" '.')" ]
-	then
-		sendErr "Malformed JSON received"
-		STATUS="fail"
-	
+
+	# 	JSON PARSING
+	# Getting our arguments from the provided JSON 
+
+	# code; User-provided code:
+
+        code="$(parseJSON "$json" ".code")"
+
+        if [ -z "$code" ]
+        then
+                sendErr "No code provided"
+                STATUS="fail"   # FAIL STATE: No code means we have nothing to compile
 	elif [ "$STATUS" != "fail" ]
 	then
-		# 	JSON PARSING
-		# Getting our arguments from the provided JSON 
+		# language; Programming language provided code is written in:
 
-		# code; User-provided code:
+		language="$(parseJSON "$json" ".language")"
 
-        	code="$(parseJSON "$json" ".code")"
-        	if [ -z "$code" ]
-        	then
-	                sendErr "No code provided"
-	                STATUS="fail"   # FAIL STATE: No code means we have nothing to compile
+		if [ -z "$language" ] # If the function call returned false (i.e. field not found)
+		then
+			sendErr "No language provided"
+			STATUS="fail"	# FAIL STATE: No language means we cannot compile
 		elif [ "$STATUS" != "fail" ]
 		then
-			# language; Programming language provided code is written in:
-	
-			language="$(parseJSON "$json" ".language")"
-	
-			if [ -z "$language" ] # If the function call returned false (i.e. field not found)
+
+			#	LANGUAGE PARSING
+			# Given the selected language, prepare the necessary executables and remember the command needed to run our code
+
+			if [ "$language" = "python" ]
 			then
-				sendErr "No language provided"
-				STATUS="fail"	# FAIL STATE: No language means we cannot compile
-			elif [ "$STATUS" != "fail" ]
+        			echo -e "$code" > code.py # Outputs code to the required file
+        			cmd="python3.6 code.py" # Executable to run
+
+			elif [ "$language" = "cpp" ]
 			then
+	        		echo -e "$code" > code.cpp && g++ code.cpp # Outputs code to required file then compiles it
+	        		cmd="./a.out" # Executable to run
 	
-				#	LANGUAGE PARSING
-				# Given the selected language, prepare the necessary executables and remember the command needed to run our code
-	
-				if [ "$language" = "python" ]
-				then
-	        			echo -e "$code" > code.py # Outputs code to the required file
-	        			cmd="python3.6 code.py" # Executable to run
-	
-				elif [ "$language" = "cpp" ]
-				then
-		        		echo "$code" > code.cpp
-					error="$(g++ code.cpp 2>&1)"
-					status=$?
+			else
+	        		sendErr "Invalid language provided: $language"
+				STATUS="fail"	# FAIL STATE: Invalid language means we cannot compile the code
+			fi
 
-					if [ $status != 0 ]
-					then
-						STATUS="fail"
-						sendErr "Code failed to compile"
-						sendErr "$error"
-					else
-						cmd="./a.out" # Executable to run
-					fi
-		
-				elif [ "$language" = "bash" ]
-				then
-					echo -e "$code" > code.sh
-					cmd="bash code.sh"
 
-				elif [ "$language" = "java" ]
-				then
-					echo "$code" > code.java
-					error="$(javac code.java 2>&1)"
-					if [ $? != 0 ]
-					then
-						STATUS="fail"
-						sendErr "Code failed to compile"
-						sendErr "$error"
-					else
-						cmd="java "$(ls | grep '.class' | sed 's/.class//g')""
+			# input; Test inputs (Not necessary):
 
-					fi
-				else
-		        		sendErr "Invalid language provided: $language"
-					STATUS="fail"	# FAIL STATE: Invalid language means we cannot compile the code
-				fi
+			input="$(parseJSON "$json" ".input")"
 
-				# input; Test inputs (Not necessary):
-
-				input="$(parseJSON "$json" ".input")"
-
-				if [ -z "$input" ]
-				then # Simply compile and return output
-					results="$(checkComp "$cmd" 5)"
-				
-				elif [ "$STATUS" != "fail" ]
-				then	# Compile, run test inputs through program, compare to test outputs and return output
-					results="$(testInput "$input" "$cmd")"	
-						
-				fi
-				
+			if [ -z "$input" ]
+			then # Simply compile and return output
+				results="$(checkHang "$cmd" 30)"
 				if [ "$results" = false ]
 				then
+					sendErr "Error: Program hangs"
 					STATUS="fail"
-
-				elif [ ! -z "$results" ]
-				then
-					OUTPUT+="$results"
+				else
+				OUTPUT+="\"given\":[ "
+				numOutputs=$(echo -e "$results" | wc -l)
+                        	OUTPUT+="["
+                        	for (( iOutput = 0; iOutput < numOutputs; iOutput++ ));
+                        	do
+                                	result="$(echo $results | awk -v i=$(( iOutput + 1)) '{print $i}')"
+                                	OUTPUT+="$result"
+                                	if [ $iOutput -ne $((numOutputs - 1)) ]
+                                	then
+                                        	OUTPUT+=", "
+                                	fi
+                        	done
 				fi
+                        	OUTPUT+="] ]"
+
+			elif [ "$STATUS" != "fail" ]
+			then	# Compile, run test inputs through program, compare to test outputs and return output
+				OUTPUT="$(testVals "$input" "$cmd")"	
+
 			fi
 		fi
 	fi
 fi
-echo -E "$(buildJSON "$STATUS" "$OUTPUT")"
+
+echo -E $(getJSON "$STATUS" "$OUTPUT")
