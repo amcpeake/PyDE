@@ -53,7 +53,7 @@ The raw script requires a UNIX bash environment and requires you to install the 
 ### Installing PyDE
 To install the unprotected version of PyDE, run:
 
-```git clone -b raw https://github.com/amcpeake/PyDE```
+```git clone -b master https://github.com/amcpeake/PyDE```
 
 ### Installing packages
 You will also need the required packages to compile/run your code, as well as [JQ](https://stedolan.github.io/jq/), a bash based JSON interpreter.
