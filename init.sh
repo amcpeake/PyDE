@@ -336,6 +336,54 @@ then
 	
 	case "$language" in
 
+		"bash") 
+                        echo -E "$code" > code.sh
+                        cmd="bash code.sh"
+                        ;;
+
+		"c")
+                        echo -E "$code" > code.c
+                        error="$(g++ code.c 2>&1)"
+                        status=$?
+                        cmd="./a.out"
+                        ;;
+
+                "cpp")
+                        echo -E "$code" > code.cpp
+                        error="$(g++ code.cpp 2>&1)"
+                        status=$?
+                        cmd="./a.out" # Executable to run
+                        ;;
+
+                "c#")
+                        echo -E "$code" > code.cs
+                        error="$(mcs code.cs 2>&1)"
+                        status=$?
+                        cmd="mono code.exe"
+                        ;;
+
+		"java")
+                        class="$(echo "$code" | grep -m 1 "public class" | sed "s/public class //g" | awk '{print $1}')"
+                        filename="${class:-code}"
+                        
+                        echo -E "$code" > $filename.java
+                        
+                        error="$(javac $filename.java 2>&1)"
+                        status=$?
+                        
+                        cmd="java "$(ls | grep '.class' | sed 's/.class//g')""
+                        ;;
+
+                "javascript")
+                        echo -E "$code" > code.js
+                        cmd="rhino code.js"
+                        ;;
+
+		"php")
+			echo -E "$code" > code.php
+			cmd="php code.php"
+			;;
+
 		"python2")
 			echo -E "$code" > code.py # Copy users code to a file
 			cmd="python2.7 code.py" # Prepare the command to execute the code
@@ -346,47 +394,9 @@ then
 			cmd="python3.6 code.py"
 			;;
 
-		"c")
-			echo -E "$code" > code.c
-			error="$(g++ code.c 2>&1)"
-			status=$?
-			cmd="./a.out"
-			;;
-
-		"cpp")
-			echo -E "$code" > code.cpp
-			error="$(g++ code.cpp 2>&1)"
-			status=$?
-			cmd="./a.out" # Executable to run
-			;;
-
-		"c#")
-			echo -E "$code" > code.cs
-			error="$(mcs code.cs 2>&1)"
-			status=$?
-			cmd="mono code.exe"
-			;;
-
-		"bash")	
-			echo -E "$code" > code.sh
-			cmd="bash code.sh"
-			;;
-
-		"java")
-			class="$(echo "$code" | grep -m 1 "public class" | sed "s/public class //g" | awk '{print $1}')"
-			filename="${class:-code}"
-			
-			echo -E "$code" > $filename.java
-			
-			error="$(javac $filename.java 2>&1)"
-			status=$?
-			
-			cmd="java "$(ls | grep '.class' | sed 's/.class//g')""
-			;;
-
-		"javascript")
-			echo -E "$code" > code.js
-			cmd="rhino code.js"
+		"ruby")
+			echo -E "$code" > code.rb
+			cmd="ruby code.rb"
 			;;
 
 		*)
