@@ -254,7 +254,7 @@ testCode() { # testCode(command, input = '') | Run program and gather status
 	then
 		msg="$(runCase "$command" "" $timeout)"
 		status=$?
-
+		
 		if [ $status != 0 ]
 		then
 			parseErr $status "$msg" "true"
@@ -283,7 +283,7 @@ testCode() { # testCode(command, input = '') | Run program and gather status
 					fi
 				
 				else
-					parseErr $status "$results"
+					parseErr $status "$results" "true"
 				fi
 
 			fi
