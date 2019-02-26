@@ -1,2 +1,13 @@
-FROM ubuntu:latest 
-RUN apt-get update && apt-get install -y jq python3.6 g++ openjdk-11-jdk 
+FROM ubuntu:latest
+
+RUN export DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get dist-upgrade	\
+	&& apt-get upgrade	\
+		&& apt-get update
+
+RUN apt-get install -y tzdata	\
+		&& ln -fs /usr/share/zoneinfo/America/New_York /etc/localtime	\
+			&& dpkg-reconfigure --frontend noninteractive tzdata
+
+RUN apt-get install -y jq python2.7 python3.6 g++ mono-devel openjdk-11-jdk rhino ruby php7.2-cli nasm binutils 
