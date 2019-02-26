@@ -1,296 +1,483 @@
 #!/bin/bash
+#===============================================================================
+# LICENSE
+#===============================================================================
+# Copyright Aidan McPeake, 2019
 #
-# 		ACCREDITATION
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 2 of the License, or
+# (at your option) any later version.
 #
-# 	All code, including frontend, backend, and handler (this script) was written by Aidan McPeake unless otherwise specified
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+#===============================================================================
+# PURPOSE
+#===============================================================================
+# This program serves as a multilanguage compiler. A user provides code
+# which is compiled by this program with any output being returned to the
+# user.
+#===============================================================================
+# PROCESS
+#===============================================================================
+# 1. JSON is passed to this script as an argument
+# 2. JSON is parsed into required fields (language and code)
+# 3. Code is compiled according to which language it is written in
+# 4. If input is present, pipe test input and parse result into sets of output
+# 5. Errors, output, etc. is parsed into a JSON string and output
+#===============================================================================
+# INPUT FORMAT
+#===============================================================================
+# A single argument is passed upon startup in the following JSON format;
+# "" denotes a string, X denotes an integer, and [] denotes an array:
+# {"language": "", "code": "", "timeout": X, "input": [[]]}
+# i.e. '{"language": "bash", "code": "echo $1", "input": [["Hello"]]}'
 #
+#	LANGUAGE | STRING
 #
-#		ARGUMENTS
+#	The language field refers to the programming language in which
+#	the code field is written. It is used to determine which commands
+#	to run to correctly compile and execute the user-provided code.
+#	i.e. 'python3'
 #
-# 	One single argument is passed from the backend in the following JSON format: (Where "" denotes a string, X denotes an integer, and [] denotes a list)
-# 		{"language": "", "code": "", "timeout": X, "input": [ [] ]}
+#	CODE | STRING
 #
-# 	Language refers to the programming language, i.e. python. It is used to determine which commands to execute to compile the user-provided code
+#	The code field is the aforementioned user-provided code.
+#	Is is an escaped string according to JSON standards.
+#	i.e. 'print(\"Hello World!\")'
 #
-# 	Code is the aforementioned user-provided code. Is is sent as an escaped string
+#	TIMEOUT | INTEGER
 #
-#	Timeout refers to the amount of time the code is allowed to run before it is considered hung, and killed accordingly
+#	The timeout field is the amount of time any code is allowed
+#	to run before it is considered 'hung' and killed accordingly.
+#	i.e. '30'
 #
-# 	Input refers simply to sets of input which are to be piped into the given code via stdin redirection (See checkComp() function)
+#	INPUT | ARRAY
 #
-# 	This program returns JSON in the form:
-#		{"status": "pass|fail", "stderr":[ "" ], "output": [ [] ]}
+#	The input field is one or more sets of input (herein called 'cases')
+#	which are to be piped into the given code via STDIN redirection
+#	(See checkComp function)
+#	i.e. '[[10, 20], [30, 40]]'
+#===============================================================================
+# OUTPUT FORMAT
+#===============================================================================
+# A single argument is returned upon exit in the following JSON format:
+# {"status": "pass|fail", "error": [""], "output": [[]]}
+# i.e. '{"status": "fail", "error": ["Program failed to compile"]}'
 #
+#	STATUS | STRING
 #
-#		PROCESS
+#	The status field is an indication of the success of the compilation
+#	and execution process of the code. If any errors occured anywhere in
+#	this process, all related STDERR will be captured and placed
+#	in the error field.
+#	i.e. 'fail'
 #
-#	1. Backend passes input as JSON to this script
-#	2. Input is parsed into required fields (language, code, input)
-#	3. Code is compiled according to which language it is written in
-#	4. If input is present, pipe test input and parse result into sets of output
-#	5. Errors, output, etc. is parsed into a JSON string and returned to backend
+#	OUTPUT | ARRAY
 #
+#	The output field is similar to the input field in that it is
+#	a set of cases of values gathered from running the program. If
+#	your code takes in two integers and adds them, each output case
+#	would be the sum of the corresponding input case.
+#	i.e. '[[30], [70]]'
 #
-# 		GLOBAL DECLARATIONS
-
-STATUS="pass"	# Flag to determine the success of the program compilation
+#	ERROR | ARRAY
+#
+#	The error field is a collection of STDERR messages in the form of
+#	an array of strings. These messages may be custom error messages
+#	(See sendError() function)
+#	i.e. '["Program failed to execute", "Unknown command \"ehco\""]'
+#===============================================================================
+# GLOBAL DECLARATIONS
+#===============================================================================
+# STATUS: Indication of the status of the program's compilation/execution
+# MAX_TIME: Maximum amount of time in seconds any program is allowed to run
+# ERROR: An array used to store error messages
+# OUTPUT: An array used to store output messages
+#===============================================================================
+STATUS=""
 MAX_TIME=30
-
-#		FUNCTIONS
-
-buildJSON() { # buildJSON(status = "$STATUS", output = "$OUTPUT") | Takes gathered variables and builds them into a json string which is returned to the backend
-	local status="${1:-}"
-	local output="${2:-}"
-	local error="$(cat stderr 2> /dev/null | tr -d '\n' | tr -s '⠀' ',')" # Get the errors stored in stderr file and replace the newlines with commas
-
-	local json="{"
-	json+="\"status\":\"$status\""
-
-	if [ ! -z "$output" ] # If the variable "output" is set...
-	then
-		json+=", \"output\":[ $output ]" # Add it to our json string
+ERRORARRAY=()
+OUTPUTARRAY=()
+#===============================================================================
+# EXIT CODES
+#===============================================================================
+# JSON ERROR CODES | 101-104
+#	101: JSON Key Error (JSONKE)			| Field does not exist
+#	102: JSON Parsing Error (JSONPE)		| Malformed JSON received
+#	103: 
+#	104: JSON General Failure (JSONGF)
+#	
+# HANDLER ERROR CODES | 105-109
+#	105: Handler Input Error (HANDIE)		| Required field not provided
+#	106:
+#	107:
+#	108:
+#	109: Handler General Failure (HGF)
+#
+# COMPILATION/EXECUTION ERROR CODES | 110+
+#	110: Code Compilation Failure (CODECF)	| Code failed to compile
+#	111: Code Execution Error (CODEEE)		| Code failed to execute
+#	124: Code Time Out (CODETO)				| Code timed out
+#===============================================================================
+E_JSONKE=101
+E_JSONPE=102
+E_HANDIE=105
+E_CODECF=110
+E_CODEEE=111
+E_CODETO=124
+#===============================================================================
+# FUNCTIONS
+#===============================================================================
+# NAME:			outputJSON
+# DESCRIPTION:	Reads global variables into correctly formatted 
+#				JSON string for output
+# FORMAT:		outputJSON()
+# INPUT:		NONE
+# OUTPUT:		NONE
+# EXIT CODES:	NONE
+#===============================================================================
+function outputJSON { 
+	local status="${STATUS:-pass}"
+	local error="$(IFS=","; echo -n "${ERROR[*]}"; IFS=" \t\n")"
+	local output="$(IFS=","; echo -n "${OUTPUT[*]}"; IFS=" \t\n")"
+	local jstring="\"status\":\"$status\""
+	
+	if [[ ! -z "$output" ]]; then
+		jstring+=",\"output\":[$output]"
 	fi
 
-	if [ ! -z "$error" ]
-	then
-		json+=", \"error\":[ ${error%?} ]" # %? removes the last character from the string (which is an invalid ',')
+	if [[ ! -z "$error" ]]; then
+		jstring+=",\"error\":[$error]"
 	fi
+
+	parseJSON "{$jstring}" '.' &> /dev/null	\
+		&& echo -En "{$jstring}"	\
+			|| echo -En '{"status":"fail","error":["Failed to build JSON"]}'
+	exit
+}
+#===============================================================================
+# NAME:			parseJSON
+# DESCRIPTION:	Reads fields from JSON string using JQ filtering
+# FORMAT:		parseJSON(jstring, filter = '.')
+# INPUT:		$jstring			| JSON string
+#				$filter => '.'		| String used to filter JSON
+# OUTPUT:		$field				| Field found by filter
+# EXIT CODES:	101					| JSONKE
+#				102					| JSONPE
+#===============================================================================
+function parseJSON {
+	local jstring="${1:-$json}"
+	local filter="${2:-.} // empty"
+	local field=""
 	
-	json+="}"
+	field="$(jq -er "$filter" 2>/dev/null <<< "$(echo -E "$jstring")")"
 	
-	if [ "$(parseJSON "$json" '.')" ] # Validate JSON before returning
-        then
-		echo -e "$json"
+	if [[ $? != 0 ]] ; then
+		return $E_JSONPE
+
+	elif [[ -z "$field" ]] ; then
+		return $E_JSONKE
+	
 	else
-		echo '{"status": "fail", "error": [ "Failed to build JSON" ] }'
+		echo -En "$field"
 	fi
 }
+#===============================================================================
+# NAME:			parseError
+# DESCRIPTION:	Takes exit codes and appends custom error messages to ERROR[]
+#				accordingly
+# FORMAT:		parseError(ecode, msg = '', fstate = 'false')
+# INPUT:		$ecode				| Error code
+#				$msg => ''			| Additional message
+#				$fstate => 'false'	| If true, sets STATUS to 'fail' upon exit
+# OUTPUT:		NONE
+# EXIT CODES:	NONE 
+#===============================================================================
+function parseError {
+	local ecode=$1
+	local msg="${2:-}"
+	local fstate="${3:-false}"
+	
+	case $ecode in
+	0)
+		;;
 
-parseJSON() { # parseJSON(json, filter = '.') | Parse JSON using jq and return the values found by the given filter or false if filter fails
-	local json="${1:-$json}"
-	local filter="${2:-.}"
-	filter+=" // empty" # Allows JQ to return a properly null string
-	local result="$(echo "$json" | jq -r "$filter" 2> /dev/null || echo false)" # Get the value at the given key, or return false if the key wasn't found
-	echo -e "$result"	
+	$E_JSONPE )
+		sendError "JSON Parsing Error: Malformed JSON received"
+		;;
+
+	$E_JSONKE )
+		sendError "JSON Key Error: Filter \"$msg\" returned no value"
+		;;
+
+	$E_HANDIE )
+		sendError "Handler Input Error:" "$msg"
+		;;
+
+	$E_CODECF )
+		sendError "Code Compilation Error: Program failed to compile" "$msg"
+		;;
+
+	$E_CODEEE )
+		sendError "Code Execution Error: Program failed to run" "$msg"
+		;;
+
+	$E_CODETO )
+		sendError "Code Execution Error: Program hangs"
+		;;
+
+	* )
+		sendError "Code Execution Error: Program failed to run" "$msg"
+		;;
+	esac
+
+	if [[ "$fstate" == "true" ]]; then
+		STATUS="fail"
+	fi
 }
-
-checkComp() { # checkComp(command, time = 30, input = '')  | Pass a series of inputs, run the code on a timer to catch hanging and return the outputs in form ["x1", "y1", "z1"], ["x2", "y2", "z2"]...
+#===============================================================================
+# NAME:			sendError
+# DESCRIPTION:	Use JQ to correctly escape error messages and add them to
+#				ERROR[] array
+# FORMAT:		sendError(*strings)
+# INPUT:		$strings			| All arguments are sent as error messages
+# OUTPUT:		NONE
+# EXIT CODES:	NONE 
+#===============================================================================
+function sendError {
+	for string in "$@"; do
+		ERROR[${#ERROR[@]}]="$(jq -saR . <<< "$(echo "$string")")"
+	done
+}
+#===============================================================================
+# NAME:			sendOutput
+# DESCRIPTION:	Use JQ to correctly escape output messages and add them to
+#				OUTPUT[] array
+# FORMAT:		sendOutput(*strings)
+# INPUT:		$strings			| All arguments are sent as output messages
+# OUTPUT: 		NONE
+# EXIT CODES:	NONE
+#===============================================================================
+function sendOutput {
+	for string in "$@"; do
+		OUTPUT[${#OUTPUT[@]}]="$(jq -sraR . <<< "$(echo "$string")")"
+	done
+}
+#===============================================================================
+# NAME:			runCase
+# DESCRIPTION:	Take an input case, run it through the program, and parse the
+#				output as an output case
+# FORMAT:		runCase(command, case = '', time = 30)
+# INPUT:		$command			| Command to execute program
+#				$inputcase => ''	| Input case to test
+#				$timeout => 30		| Maximum time to allow program to run
+# OUTPUT:		$outputcase			| String formatted as JSON array
+# EXIT CODES:	111					| CODEEE
+#				124					| CODETO
+#===============================================================================
+function runCase {
 	local command="$1"
-	local time=${2:-30} # Evaluates to $2 if $2 is set and not null and defaults to 30 otherwise
-	local input="${3:-}"
-	local results # Must be declared separately to avoid sweeping of exit codes
-	if [ -z "$input" ] # If there's no input...
-	then
-		results="$(timeout $time $command 2>&1)" # Simply compile the program and gather any output
-	else # If there is input...
-		results="$(timeout $time $command 2>&1 <<< "$(echo -e "$input")")" # Pipe it into the program and gather any output
+	local inputcase="${2:-}"
+	local time=${3:-30}
+	local output=""
+	local outputcase=""
+	
+	output="$(timeout $time $command 2>&1 <<< "$(echo -e "$inputcase")")"
+	local status=$?
+
+	if [[ $status == 124 ]]; then
+		return $E_CODETO
+	
+	elif [[ $status != 0 ]]; then
+		echo -En "$output"
+		return $E_CODEEE
+	
+	elif [[ $status == 0 ]] && [[ ! -z "$output" ]]; then
+		outputcase+="$(jq -aR . <<< "$(echo -e "$output")")"	
+		echo -En "[${outputcase}]" | tr '\n' ','
 	fi
-	local status=$? # Check the status of the running of the program
-	if [ "$status" = 124 ] # 124 is the exit code returned by timeout if the command timed out
-	then 
-		sendErr "Program hangs. Incorrectly waiting for input?"
-		echo false
+}
+#===============================================================================
+# NAME:			testCode
+# DESCRIPTION:	Execute code and parse the status
+# FORMAT:		testCode(command, input = '')
+# INPUT:		$command			| Command to execute program
+#				$inputcase => ''	| Input case
+# OUTPUT:		NONE
+# EXIT CODES:	NONE
+#===============================================================================
+function testCode {
+	local command="$1"
+	local inputcase="${2:-}"
+	local outputcase=""
+	local status=""
+
+	if [[ -z "$inputcase" ]]; then
+		outputcase="$(runCase "$command" "" $timeout)"
+		status=$?
+		
+			
+		if [[ $status == 0 ]] && [[ ! -z "$outputcase" ]]; then
+			sendOutput "$outputcase"
+		
+		else
+			parseError $status "$outputcase" "true"
+		fi
 	
-	elif [ "$status" != 0 ] # 0 is the exit code indicating the command executed successfully within the given time
-	then
-		sendErr "$results"
-		echo false
-	
-	elif [ ! -z "$results" ]
-	then
-		local numLines="$(echo -e "$results" | wc -l)"
-		for (( i = 1; i <= numLines; i++ ))
-		do
-			local result="$(echo -e "$results" | awk -v i="$i" 'BEGIN{ RS = "" ; FS = "\n" }{print $i}')"
-			if [ ! -z "$result" ]
-			then
-				case+="$(jq -aR . <<< "$(echo -En "$result")")"
-				if [ $i -lt $numLines ]
-				then
-					case+=", "
+	else
+		local numCases=$(parseJSON "$inputcase" ".|length")
+		
+		for (( iCase = 0; iCase < numCases; iCase++ )); do
+			if [[ "$STATUS" != "fail" ]]; then
+				local input="$(parseJSON "$inputcase" ".[$iCase][]")"
+				outputcase="$(runCase "$command" "$input" $timeout)"
+				status=$?
+				
+				if [[ $status == 0 ]] && [[ ! -z "$outputcase" ]]; then
+					sendOutput "$outputcase"
+
+				else
+					parseError $status "$outputcase" "true"
 				fi
 			fi
 		done
-		
-		if [ ! -z "$case" ]
-		then
-			echo "[$case]"
-		fi
 	fi
 }
-
-sendErr() { # sendErr(*strings) | Pipe given strings to stderr
-	if [ -z "$1" ]
-	then
-		read str
+#===============================================================================
+# PROGRAM ENTRYPOINT
+#===============================================================================
+# INPUT PARSING
+#===============================================================================
+while [[ "$STATUS" != "fail" ]]; do
+	if [[ -z "$1" ]]; then
+		parseError $E_HANDIE "No argument provided" "true"
+		break
+	
 	else
-		str="$@"
+		json="$1" 
+		parseJSON "$json" '.' &> /dev/null	\
+			|| { parseError $E_JSONPE "" "true"	\
+				; break; }
 	fi
-	echo -n "$(jq -aR . <<< "$(echo "$str" | awk '{printf "%s\\n", $0}' | sed 's/\t/\\t/g')")⠀" >> stderr # Append at the end of the message to distinguish newlines from the intended end of a message
-}
-
-testInput() { # testInput(json, command) | Take input, run through program and determine status, returns false if code hangs or fails to compile
-	local json="$1"
-	local command="$2"
-	local numCases=$(parseJSON "$json" ".|length")
-	local msg=""
-	local status="pass"
-	for (( iCase = 0; iCase < numCases; iCase++ )); # Iterate through cases, i.e. [3, 2] 
-	do
-		if [ "$status" != "fail" ]
-		then
-			local numInputs=$(parseJSON "$json" ".[$iCase]|length")
-			local iString=""
-	
-			for (( iInput = 0; iInput < numInputs; iInput++ ));
-			do
-				iString+="$(parseJSON "$json" ".[$iCase][$iInput]")\n"
-			done
-
-			local results="$(checkComp "$command" $timeout "$iString")"
-			if [ "$results" = false ]
-			then
-				status="fail"
-
-			elif [ ! -z "$results" ]
-			then
-				msg+="$results"
-			
-				if [ $iCase -ne $((numCases - 1)) ]
-				then
-					msg+=", "
-				fi
-			fi
-		fi
-	done
-	if [ "$status" = "fail" ]
-	then
-		echo false
-	elif [ "$status" = "pass" ]
-	then
-		echo "$msg"
+#===============================================================================
+# JSON PARSING
+#===============================================================================
+# 	CODE
+#===============================================================================
+	code="$(parseJSON "$json" ".code")"	\
+		|| { parseError $E_HANDIE "No code provided" "true"	\
+			; break; }
+#===============================================================================
+#	TIMEOUT
+#===============================================================================
+	timeout=$(parseJSON "$json" ".timeout")
+	if [[ -z "$timeout" ]]	\
+		|| ! [[ $timeout =~ ^[0-9]+$ ]]	\
+			|| [[ $timeout -ge $MAX_TIME ]]; then
+		timeout=30
 	fi
-}
-
-
-
-#	INPUT PARSING
-# Since this input is coming from the backend we can assume correct formatting, however error checking will still be performed
-
-
-if [ -z "$1" ] # Check if we have a first argument
-then
-	sendErr "No argument provided"
-	STATUS="fail" 	# FAIL STATE: No input means we cannot compile
-else
-	json=$1
-
-	if [ ! "$(parseJSON "$json" '.')" ]
-	then
-		sendErr "Malformed JSON received"
-		STATUS="fail"
-	fi
-fi
-	
-# 	JSON PARSING
-# Getting our arguments from the provided JSON 
-# code; User-provided code:
-
-code="$(parseJSON "$json" ".code")"
-if [ -z "$code" ] && [ "$STATUS" != "fail" ]
-then
-	sendErr "No code provided"
-	STATUS="fail"   # FAIL STATE: No code means we have nothing to compile
-fi
-
-# timeout; Time the program is allowed to run for
-
-timeout=$(parseJSON "$json" ".timeout")
-if [ -z "$timeout" ] || ! [[ $timeout =~ ^[0-9]+$ ]] || [ $timeout -ge $MAX_TIME ]
-then
-	timeout=30
-fi
-
-# language; Programming language provided code is written in:
-
-language="$(parseJSON "$json" ".language")"
-if [ -z "$language" ] && [ "$STATUS" != "fail" ] # If the function call returned false (i.e. field not found)
-then
-	sendErr "No language provided"
-	STATUS="fail"	# FAIL STATE: No language means we cannot compile
-elif [ "$STATUS" != "fail" ]
-then
-
-#	LANGUAGE PARSING
-# 	Given the selected language, prepare the necessary executables and remember the command needed to run our code
+#===============================================================================
+#	LANGUAGE
+#===============================================================================
+	language="$(parseJSON "$json" ".language")"	\
+		|| { parseError $E_HANDIE "No language provided" "true"	\
+			; break; }
 	
 	case "$language" in
-		"python3")
-			echo -e "$code" > code.py # Outputs code to the required file
-			cmd="python3.6 code.py" # Executable to run
-			;;
+	"x86" )
+		echo -E "$code" > code.asm
+		error="$(nasm -f elf code.asm && ld -m elf_i386 -s -o code code.o)"
+		status=$?
+		cmd="./code"
+		;; 
+	"bash" ) 
+		echo -E "$code" > code.sh
+		cmd="bash code.sh"
+		;;
 
-		"cpp")
-			echo "$code" > code.cpp
-			error="$(g++ code.cpp 2>&1)"
-			status=$?
-			if [ $status != 0 ]
-			then
-				sendErr "Code failed to compile"
-                        sendErr "$error"
-                        STATUS="fail"
-                	else
-                        	cmd="./a.out" # Executable to run
-                	fi
-			;;
+	"c" )
+		echo -E "$code" > code.c
+		error="$(g++ code.c 2>&1)"
+		status=$?
+		cmd="./a.out"
+		;;
 
-		"bash")	
-			echo "$code" > code.sh
-			cmd="bash code.sh"
-			;;
+	"cpp" )
+		echo -E "$code" > code.cpp
+		error="$(g++ code.cpp 2>&1)"
+		status=$?
+		cmd="./a.out"
+		;;
 
-		"java")
-			class="$(echo "$code" | grep -m 1 "public class" | sed "s/public class //g" | awk '{print $1}')"
-			filename="${class:-code}"
-			echo "$code" > $filename.java
-                	error="$(javac $filename.java 2>&1)"
-                	if [ $? != 0 ]
-                	then
-                        	sendErr "Code failed to compile"
-                        	sendErr "$error"
-                        	STATUS="fail"
-                	else
-                        	cmd="java "$(ls | grep '.class' | sed 's/.class//g')""
-                	fi
-			;;
+	"c#" )
+		echo -E "$code" > code.cs
+		error="$(mcs code.cs 2>&1)"
+		status=$?
+		cmd="mono code.exe"
+		;;
 
-		*)
-			sendErr "Invalid language provided: $language"
-			STATUS="fail"	# FAIL STATE: Invalid language means we cannot compile the code
-			;;
+	"java" )
+		class="$(echo "$code"	\
+			| grep -m 1 "public class"	\
+				| sed "s/public class //g"	\
+					| awk '{print $1}')"
+		filename="${class:-code}"
+
+		echo -E "$code" > $filename.java
+                        
+		error="$(javac $filename.java 2>&1)"
+		status=$?
+                        
+		cmd="java "$(ls | grep '.class' | sed 's/.class//g')""
+		;;
+
+	"javascript" )
+		echo -E "$code" > code.js
+		cmd="rhino code.js"
+		;;
+
+	"php" )
+		echo -E "$code" > code.php
+		cmd="php code.php"
+		;;
+
+	"python2" )
+		echo -E "$code" > code.py
+		cmd="python2.7 code.py"
+		;;
+
+	"python3" )
+		echo -E "$code" > code.py
+		cmd="python3.6 code.py"
+		;;
+
+	"ruby" )
+		echo -E "$code" > code.rb
+		cmd="ruby code.rb"
+		;;
+	
+	* )
+		parseError $E_HANDIE "Invalid language \"$language\"" "true"
+		break
+		;;
 	esac
-fi	
 
-# input; Test inputs (Not necessary):
-
-input="$(parseJSON "$json" ".input")"
-
-if [ -z "$input" ] && [ "$STATUS" != "fail" ]
-then # Simply compile and return output
-	results="$(checkComp "$cmd" $timeout)"
-				
-elif [ "$STATUS" != "fail" ]
-then	# Compile, run test inputs through program, compare to test outputs and return output
-	results="$(testInput "$input" "$cmd")"	
-						
-fi
-				
-if [ "$results" = false ]
-then
-	STATUS="fail"
-elif [ ! -z "$results" ]
-then
-	OUTPUT+="$results"
-fi
-
-echo -En "$(buildJSON "$STATUS" "$OUTPUT")"
+	if [[ ${status:-0} != 0 ]]; then
+		parseError $E_CODECF "$error" "true"
+		break
+	fi
+#===============================================================================
+#	INPUT
+#===============================================================================
+	input="$(parseJSON "$json" ".input")"
+#===============================================================================
+# CODE EXECUTION
+#===============================================================================
+	testCode "$cmd" "$input"
+#===============================================================================
+break
+done
+outputJSON "$STATUS" "$OUTPUT" "$ERROR"
